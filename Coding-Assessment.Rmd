@@ -1,0 +1,535 @@
+---
+title: "\\vspace{0.5cm} Investigating the Admissions and Deaths from Unintentional Injuries in NHS Scotland"
+subtitle: "Including detailed analysis of most significant injury type"
+author: "Exam number: B213221"
+date: "`r Sys.Date()`"
+output: pdf_document
+geometry: margin = 0.5in
+fontsize: 10pt
+---
+
+# Overview
+
+\footnotesize In this report, we will explore and present the admissions and deaths from Unintentional Injuries throughout NHS Scotland. The data sets analysed here were sourced from the open source database of Public Health Scotland: <https://www.opendata.nhs.scot/dataset/unintentional-injuries>.
+
+These data sets span from 2011 to 2021, the admissions data is tracked according to financial year whereas the deaths data are according to the whole year. The data also records the age of the patient and were placed in eight age ranges in the raw data. However, for simplification of the later analysis the age ranges were placed in three categories as will be discussed later.
+
+This analysis will aim to answer the following questions:
+
+-   What is the most common injury sustained by age group ?
+-   What injury caused the most deaths by age group ?
+-   Which Health boards had the highest rate of change from the most significant injury ?
+
+In summary, the most common injury sustained was falls by all age groups in terms of admissions. For deaths, each age group had unique causes being Other, Poisonings, Falls for children, adults and the elderly, respectively.
+
+***
+
+# Loading packages and Data
+```{r chunk size code, message=FALSE, warning=FALSE, size="scriptsize"}
+# Credit to Martin Schmelzer:
+#https://stackoverflow.com/questions/25646333/code-chunk-font-size-in-rmarkdown-with-knitr-and-latex
+# Makes code chunk font size smaller
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\n \\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+})
+
+```
+```{r echo=TRUE, message=FALSE, warning=FALSE, size="scriptsize"}
+# Loading Libraries and Code Config
+pacman::p_load(tidyr,forcats,ggplot2,gt,lubridate,rmarkdown,tinytex,readr,dplyr,stringr,gtools,
+               patchwork,png,webshot,rgdal,sp,sf,broom,viridisLite,viridis,scales,ggrepel)
+## Loading Raw Data 
+#Health Board Codes (HB)
+HB <- read_csv("hb_lookup.csv")
+#Unintentional accidents admissions (UIA_raw)
+UIA_raw <- read_csv("ui_admissions_2022.csv")
+# Unintentional accidents deaths (UID_raw)
+UID_raw <- read_csv("ui_deaths_2022.csv")
+```
+
+\footnotesize The raw data sets that will used throughout the report are :
+
+Health Board Codes whose data-frame will be named `HB`, this contains the health board names and region codes. This dataframe will be joined to the other datasets in order to assist in the analysis on individual Health Boards (HBs).
+
+Unintentional Injuries admissions whose data frame will be named `UIA_raw` , this contains all admissions data from Financial Years 2011/12 to 2020/21 in all HBs as well as aggregate counts such as all ages and all of Scotland. These aggregate values will be removed later on so that they don't skew results.
+
+Unintentional Injuries deaths whose data frame will be named `UID_raw`, this contains all deaths data from the years 2011 to 2020 in all HBs. Similar aggregate values will be removed later.
+
+Both raw data sets will be kept unaltered as a precaution so we can return to it if the code needs to be amended. The next section will wrangle and clean the data sets.
+
+***
+
+# Data Processing
+```{r message=FALSE, warning=FALSE, size="scriptsize"}
+##Cleaning UIA and UID
+UIA_clean <- UIA_raw %>% 
+  # Removing aggregate values
+  filter(AgeGroup != 'All') %>%
+  filter(AgeGroup != 'under75 years') %>%
+  filter(Sex != 'All') %>% 
+  filter(HBR != 'S92000003') %>% 
+  filter(InjuryType != 'All Diagnoses') %>% 
+# Joining HB names
+  left_join(HB,HDA, by = c("HBR" = "HB"))  
+
+UID_clean <- UID_raw %>% 
+  # Removing aggregate values
+  filter(AgeGroup != 'All') %>%
+  filter(AgeGroup != 'under75 years') %>%
+  filter(Sex != 'All') %>% 
+  filter(HBR != 'S92000003') %>% 
+  filter(InjuryType != 'All') %>% 
+  # Joining HB names
+  left_join(HB,HDA, by = c("HBR" = "HB"))  
+
+# Dropping QF cols
+drops <- c('HBRQF','CAQF','AgeGroupQF',
+           'SexQF','InjuryLocationQF','InjuryTypeQF',
+           'HBDateArchived','Country','HBDateEnacted')
+
+UIA_clean <- UIA_clean[ , !(names(UIA_clean) %in% drops)]
+UID_clean <- UID_clean[ , !(names(UID_clean) %in% drops)]
+
+# Aggregating Age groups into 3 age categories
+
+age_groups <- c(    "0-4 years" = "Children","5-9 years" = "Children","10-14 years"  ="Children",
+                    "15-24 years" = "Adults","25-44 years" = "Adults","45-64 years"  = "Adults",
+                    "65-74 years" = "Elderly","75plus years" = "Elderly")
+#For UIA
+UIA_clean$AgeGroup <- UIA_clean$AgeGroup %>% 
+  str_replace_all(age_groups)
+
+#For UID
+UID_clean$AgeGroup <- UID_clean$AgeGroup %>% 
+  str_replace_all(age_groups)
+
+# Changing "Land transport accidents" in deaths data set to "RTA" for
+# better continuity between Figures
+
+UID_clean$InjuryType <- UID_clean$InjuryType %>% 
+  str_replace_all(c("Land transport accidents" = "RTA"))
+
+
+# Formatting Year col to Date
+UID_clean$Year <- as.Date.character(UID_clean$Year, format = "%Y")
+UID_clean$Year <- year(UID_clean$Year)
+
+# To order facet wrap later
+#For UIA
+UIA_clean$AgeGroup <- factor(UIA_clean$AgeGroup, levels = c("Children","Adults","Elderly"))
+#For UID
+UID_clean$AgeGroup <- factor(UID_clean$AgeGroup, levels = c("Children","Adults","Elderly"))
+```
+
+\footnotesize Data frames `UIA_clean` and `UID_clean` were made to be distinguished from the raw data frames. Here we'll go through the steps taken to have a usable data frame.
+
+\footnotesize Firstly, aggregate categories such the "All" categories from columns `Sex`, `AgeGroup`, and in `InjuryType` "All Diagnoses" were removed. The "Under75years" category was removed from `AgeGroup` as it aggregates all age groups below 75 years old. The "S92000003" category in `HBR` as this code is the aggregate code for the whole of Scotland
+
+Next, the HB dataframes were joined to both `UIA_clean` and `UID_clean` by the ID column HBR. Then the age groups were altered as mentioned earlier. The three age ranges of 0-4, 5-9, and 10-14 were changed to "Children". The three age ranges of 15-24, 25-44, 45-64 were changed to "Adults"; the final two age ranges of 65-74 and 75plus was changed to "Elderly". The compression of these categories will remove some granularity to the age analysis yet it will make the figures clearer later on. 
+
+Finally, a small change to `UID_clean` was done on column `Injurytype`, the injury type of "Land transport accident" was changed to "RTA" to be in line with `UIA_clean` to improve continuity between figures later on. The age groups were set as factors so that data will be ordered from Children to Elderly in the graph facets and tables.
+
+***
+
+# Results
+
+## Figure 1. Admissions of Unintentional Injuries
+
+```{r fig.height=7, fig.width=10, message=FALSE, warning=FALSE, size="scriptsize"}
+### UIA Figure
+## Line plot of injuries over time per age group
+fig1a_data <- UIA_clean %>% 
+  group_by(FinancialYear,AgeGroup,InjuryType) %>% 
+  summarise(NumberOfAdmissions = sum(NumberOfAdmissions))
+
+# Distinct colours for fig1a
+colours <- c("#1F77B4", "#AEC7E8", "#FF7F0E", "#FFBB78","#2CA02C", "#98DF8A", "#D62728", "#FF9896")
+
+# Fig1a settings
+fig1a <- fig1a_data %>% 
+  ggplot(aes(x= FinancialYear,
+             y= NumberOfAdmissions,
+             group = InjuryType,
+             colour = InjuryType)) +
+  geom_line(size = 1, aes(col = InjuryType)) +
+# log^10 scale to separate lines
+  scale_y_log10() +
+  facet_wrap(~AgeGroup) +
+  labs(x = "Financial Year",
+       y = bquote("Number of Admissions"~(Log^10)),
+       title = "Admissions over time",
+       subtitle = "") +
+  theme_bw()+
+# Adjusting text elements to centre titles and offset x axis values
+  theme(axis.text.x = element_text(angle = 70, hjust = 1,vjust = 1),
+        plot.caption.position = "panel",
+        plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(hjust = .5),
+        legend.position = "bottom")+
+# Colour setting
+  scale_color_manual(values =  colours,
+                     guide = guide_legend(nrow = 2))
+
+## Table to show fold change between 2011 and 2020
+# 2011 and 2021 data frame
+
+UIA_2011 <- UIA_clean %>% 
+  filter(FinancialYear == "2011/12") %>% 
+  select('FinancialYear','AgeGroup','InjuryType','NumberOfAdmissions') %>% 
+  group_by(FinancialYear,AgeGroup,InjuryType) %>% 
+  summarise(NumberOfAdmissions = sum(NumberOfAdmissions))
+
+UIA_2020 <- UIA_clean %>% 
+  filter(FinancialYear == "2020/21") %>% 
+  select('FinancialYear','AgeGroup','InjuryType','NumberOfAdmissions') %>% 
+  group_by(FinancialYear,AgeGroup,InjuryType) %>% 
+  summarise(NumberOfAdmissions = sum(NumberOfAdmissions))
+
+# Gluing both tables together
+fig1b_data <- bind_rows(UIA_2011,UIA_2020)
+
+## GT table of counts and fold change
+# Separating dates to own columns for table
+fig1b_data <-  fig1b_data %>% 
+  pivot_wider(names_from = FinancialYear, values_from = NumberOfAdmissions) 
+  
+# Adding fold change column
+fig1b_data$Foldchange <- ((fig1b_data$`2020/21`/fig1b_data$`2011/12`)-1)
+
+# GT table
+fig1b <- fig1b_data%>%              
+  gt(rowname_col = "InjuryType", groupname_col = "AgeGroup") %>% 
+  tab_spanner(label = "Number of Admissions",
+              columns = c("2011/12","2020/21")) %>% 
+  
+# Fold change to percentage
+  fmt_percent(columns = Foldchange,
+             decimals = 1) %>% 
+  
+# Formatting table
+  cols_label(Foldchange = "Fold Change (%)") %>% 
+  tab_stubhead(label = "Injury Type per Age Group") %>% 
+  cols_align(align = "center", columns = everything()) %>% 
+  tab_header(title = "Counts Table with Fold change  (%)",
+             subtitle = "2011/12 and 2020/21 snapshot") %>% 
+  tab_style(style = cell_text(align = "left"),
+            locations = cells_stub(rows = TRUE))
+
+# Saving Gt table as PNG to work with patchwork 
+#Solution by JohannesNE(https://github.com/rstudio/gt/issues/420)
+
+tmp <- tempfile(fileext = '.png') #generate path to temp .png file
+invisible(gtsave(fig1b, tmp, path = NULL)) #save gt table as png with invisble function to prevent the gt png image from appearing during render
+fig1b_png <- png::readPNG(tmp, native = TRUE) # read tmp png file
+
+# Patchwork fig1 a and b together
+fig1 <- fig1a + fig1b_png + 
+  plot_annotation(tag_levels = "a",
+                  tag_suffix = ")",
+                  title = "Fig 1. NHS Scotland admissions of Unintentional injuries",
+                  subtitle = "By Age Group from 2011 to 2021",
+                  caption = "Data aggregated from all of NHS Scotlands' health boards",
+  theme = theme(plot.title = element_text(hjust = 0.5),
+                plot.subtitle = element_text(hjust = 0.5),
+                plot.caption = element_text(hjust = 0)))
+
+plot(fig1)
+```
+
+\footnotesize Fig1.a) is a faceted line graph showing the counts of all injury types per year. The facets show the counts for the age groups. This was to show the different trends in counts over time for each age. The number of admissions axis was set to log-scale, this was done to spread out the lines as the lines tended to clump around certain ranges such as the 100 and 1000s. Also the counts for Falls were the much higher than the rest and it meant that most of the lines were squashed at the bottom of the graph. Fig1.b) is a table with injury types grouped by age group as the categories and three columns being a snapshot of the counts for the financial years 2011/12 and 202/21 and a fold change column. Fold change was made in order to show the percentage change between the two financial years.
+
+The most common injury found across all age groups is falls, with it making a significant portion of the injuries found among the elderly. The trend for falls seems to increase overtime in the elderly, remain stable in adults, and has decreased in children, with 2020/21 marking the low point in terms of falls admissions.
+
+In the children facet, we see that the trends for most injuries seems to decrease over time with sharp downturn in injuries in 2019/20 and 20/21. A notable trend has happened with RTA (Road Traffic Accidents) as it appears to show a gradual and significant drop of 49% (Fig1.b) since 2011/12.
+
+In the adult facet, we see that most injuries have trended slightly upwards up until 2019/20. However two of the injury types : Accidental Exposure and Poisonings have shown a consistent yet opposing trend since 2011/12. Accidental exposures have decreased by 50% year over year up until 2018/19 and then leveling off. Poisonings ,however, have increased 90% since 2011/12.
+
+In the elderly facet, we see that most injuries follow the trends as seen in adults yet with smaller numbers. Falls make up the majority , as discussed before; poisonings showing the biggest increase and accidental exposure showing the biggest decrease.Poisonings increasing by 66% and accidental exposure decreasing by 47%.
+
+On a final note, across all age groups we see a sharp decline across most injuries from 2019/20 until 2020/21. This in part could be due to the pandemic and the mandates for people to stay at home which lead to decreases in injury types such as RTA, Struck by / against, and Other.
+
+However, it must be noted that there were sharp declines from 2019/20 that will skew the fold change values as some injuries show abrupt decreases (on average 30%) when their overall trend is stable over the ten years. In adults being admitted due to being struck by/against is an example of the abrupt change(-46% foldchange). For 2018/19, the numbers admitted for struck by/against in adults was 2974; compare that with 2011/12 being 3230, that is only a 8% decrease.
+
+Yet despite the sharp decrease, the injury type admitted that has shown the greatest increase over time in every age group is poisonings. This is especially pronounced amongst adults with a near doubling (91%). The injury type admitted that has shown significant decreases since 2011/12 between all age groups is accidental exposure with an average fold change of -47.33%.
+
+***
+
+## Figure 2. Deaths from Unintentional Injuries
+
+```{r fig.height=7, fig.width=10, message=FALSE, warning=FALSE, size="scriptsize"}
+### UID Figure
+## Line plot of injuries over time per age group
+fig2a_data <- UID_clean %>% 
+  group_by(Year,AgeGroup,InjuryType) %>% 
+  summarise(NumberofDeaths = sum(NumberofDeaths))
+
+# Fig2a settings
+fig2a <- fig2a_data %>% 
+  ggplot(aes(x= Year,
+             y= NumberofDeaths,
+             group = InjuryType,
+             colour = InjuryType)) +
+  geom_line(size = 1, aes(col = InjuryType)) +
+  # log^10 scale to separate lines
+  scale_y_log10()+
+  scale_x_continuous(breaks = c(2011:2020))+
+  facet_wrap(~AgeGroup) +
+  labs(x = "Year",
+       y = bquote("Number of Deaths"~(Log^10)),
+       title = "Deaths over time",
+       subtitle = "") +
+  theme_bw()+
+  # Adjusting text elements to center titles and offset x axis values
+  theme(axis.text.x = element_text(angle = 70, hjust = 1,vjust = 1),
+        plot.caption.position = "panel",
+        plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(hjust = .5),
+        legend.position = "bottom")+
+  # Colour setting same as fig1
+  scale_color_manual(values =  colours,
+                     guide = guide_legend(nrow = 2))
+
+## Table to show fold change between 2011 and 2020
+# 2011 and 2021 data frame
+
+UID_2011 <- UID_clean %>% 
+  filter(Year == "2011") %>% 
+  select('Year','AgeGroup','InjuryType','NumberofDeaths') %>% 
+  group_by(Year,AgeGroup,InjuryType) %>% 
+  summarise(NumberofDeaths = sum(NumberofDeaths))
+
+UID_2020 <- UID_clean %>% 
+  filter(Year == "2020") %>% 
+  select('Year','AgeGroup','InjuryType','NumberofDeaths') %>% 
+  group_by(Year,AgeGroup,InjuryType) %>% 
+  summarise(NumberofDeaths = sum(NumberofDeaths))
+
+# Gluing both tables together
+fig2b_data <- bind_rows(UID_2011,UID_2020)
+
+## GT table of counts and fold change
+# Separating dates to own columns for table
+fig2b_data <-  fig2b_data %>% 
+  pivot_wider(names_from = Year, values_from = NumberofDeaths) 
+
+# Adding fold change column
+fig2b_data$Foldchange <- ((fig2b_data$`2020`/fig2b_data$`2011`)-1)
+
+# GT table
+fig2b <- fig2b_data%>%              
+  gt(rowname_col = "InjuryType", groupname_col = "AgeGroup") %>% 
+  tab_spanner(label = "Number of Deaths",
+              columns = c("2011","2020")) %>% 
+  # Substituting NAs with -
+  sub_missing(columns = Foldchange,
+              missing_text = "-") %>% 
+  
+  # Fold change to percentage
+  fmt_percent(columns = Foldchange,
+              decimals = 1) %>% 
+  
+  # Formatting table
+  cols_label(Foldchange = "Fold Change (%)") %>% 
+  tab_stubhead(label = "Injury Type per Age Group") %>% 
+  cols_align(align = "center", columns = everything()) %>% 
+  tab_header(title = "Counts Table with Fold change  (%)",
+             subtitle = "2011/12 and 2020/21 snapshot") %>% 
+  tab_style(style = cell_text(align = "left"),
+            locations = cells_stub(rows = TRUE))
+
+# Saving Gt table as PNG to work with patchwork 
+#Solution by JohannesNE(https://github.com/rstudio/gt/issues/420)
+
+tmp <- tempfile(fileext = '.png') #generate path to temp .png file
+invisible(gtsave(fig2b, tmp, path = NULL)) #save gt table as png + invisble png output
+fig2b_png <- png::readPNG(tmp, native = TRUE) # read tmp png file
+
+
+# Patchwork fig2 a and b together
+fig2a + fig2b_png + 
+  plot_annotation(tag_levels = "a",
+                  tag_suffix = ")",
+                  title = "Fig 2. NHS Scotland deaths from Unintentional injuries",
+                  subtitle = "By Age Group from 2011 to 2021",
+                  caption = "Data aggregated from all of NHS Scotlands' health boards",
+                  theme = theme(plot.title = element_text(hjust = 0.5),
+                                plot.subtitle = element_text(hjust = 0.5),
+                                plot.caption = element_text(hjust = 0)))
+```
+
+\footnotesize
+
+Figure 2. a) is a faceted line graph with identical layout that was discussed in the previous section. The x-axis here is of whole years as opposed to the financial years from the admissions data. The log scale for the number of deaths axis was maintained in this figure as well. This was kept to separate out the lines as some of the low count ones were squashed at the bottom of the graph in linear scale. Figure 2. b) is also in the same format as Fig. 1b). The fold change column is perhaps not as valuable as a piece of information when the n-number of deaths are in the single digits but it still quantifies the larger causes of deaths well and provides insight into which cause has seen the greatest change between the tail ends of the years.
+
+The most common cause of death is not as universal as the cause of admissions was in Figure 1. Here the most common cause was specific to each age group. An analysis of each facet will be done below :
+
+For children, fortunately unintentional injuries cause very few deaths between all injury types as none reached above 30 in any given year. Yet, two injuries have caused the most since 2011 and have oscillated for the top spot are RTA and Other. RTA was in the double digits up until 2016 with a peak of 24 deaths then a sequential drop until 2019 with a low of 2 deaths, finally a sharp four times increase in 2019 (8 deaths). Although, the Other injury type appears more consistent; ending in 2020 with an associated 20 deaths.As the counts were fortunately quite low it meant that none of the fold change data was even quantifiable since counts for years were zero.
+
+For adults, the most common cause of death is from poisonings and has been consistently the most common since 2011 with it showing the steepest increase (200%) amongst all causes of deaths. The second most common being RTA although that has shown a slight decrease (-29%) over the years. Interestingly, accidental exposure was shown to have halved in the number of admissions in Fig.1, as a cause of death however it has remained constant and has even increased in recent years.
+
+For the elderly, The most common cause of death is falls with it being consistent over time and with an increased trend (33%). The trends in admissions and deaths seem to be consistent between each other. Yet, just like in adults, accidental exposure has shown a marked increase (100%) as the cause of death even when less were being admitted for that cause of injury. Accidental exposure even took over Other as the second greatest cause of death amongst the elderly in 2019, the count for accidental exposure was 92; that means that there was an approximate increase of 90% within a year.
+
+In conclusion, between Figures 1 and 2., we can see that a significant trend that has stood out in admissions and deaths, and that is unintentional adult poisonings. In the next section, we will focus on this injury type and try to visualize and quantify in which health board does this occur in the most.
+
+***
+
+## Figure 3. Unintentional Adult Poisonings
+
+```{r fig.height=12, fig.width=12, message=FALSE, warning=FALSE, size="scriptsize"}
+## Fig 3
+# Focus on Adult Poisonings (AP) dataframes 2011 + 2020
+
+AP_admissions <- UIA_clean %>% 
+  select(c(HBName,FinancialYear,AgeGroup,InjuryLocation,InjuryType,NumberOfAdmissions)) %>% 
+  filter(AgeGroup == "Adults") %>% 
+  filter(InjuryType == "Poisoning") %>% 
+  filter(FinancialYear %in% c("2011/12","2020/21")) %>% 
+  group_by(HBName,FinancialYear) %>% 
+  summarise(NumberOfAdmissions = sum(NumberOfAdmissions)) %>% 
+  pivot_wider(names_from = FinancialYear, values_from = NumberOfAdmissions)
+
+AP_admissions$Foldchange <- ((AP_admissions$`2020/21`/ AP_admissions$`2011/12`)-1)
+
+AP_deaths <- UID_clean %>% 
+  select(c(HBName,Year,AgeGroup,InjuryLocation,InjuryType,NumberofDeaths)) %>% 
+  filter(AgeGroup == "Adults") %>% 
+   filter(InjuryType == "Poisoning") %>% 
+  filter(Year %in% c("2011","2020")) %>% 
+  group_by(HBName,Year) %>% 
+  summarise(NumberofDeaths = sum(NumberofDeaths)) %>% 
+  pivot_wider(names_from = Year, values_from = NumberofDeaths)
+
+AP_deaths$Foldchange <- ((AP_deaths$`2020`/ AP_deaths$`2011`)-1)
+
+AP <- left_join(AP_admissions,AP_deaths, by = c("HBName"))
+# NHS Scotland spatial data 
+# https://spatialdata.gov.scot/geonetwork/srv/eng/catalog.search#/metadata/f12c3826-4b4b-40e6-bf4f-77b9ed01dc14
+
+map_shp <- readOGR(dsn = "SG_NHS_HealthBoards_2019.shp")
+map_df <- broom::tidy(map_shp)
+# Recover row name 
+temp_df <- data.frame(map_shp@data$HBName)
+names(temp_df) <- c("HBName")
+# Create and append "id"
+temp_df$id <- seq(0,nrow(temp_df)-1) %>% 
+  as.character()
+# Final shp data frame
+fixed_shp <- full_join(map_df, temp_df, by="id")
+# Adding NHS prefix to join both data sets later
+fixed_shp$HBName <- paste('NHS', fixed_shp$HBName, sep = ' ')
+
+# Multiply fold change by 100 to display as percentage
+AP_deaths$Foldchange <-  AP_deaths$Foldchange*100
+AP_admissions$Foldchange <-  AP_admissions$Foldchange*100
+
+# Joining foldchange data to map data for admissions and deaths
+heatmap_admissions <- full_join(fixed_shp, AP_admissions, by= "HBName")
+heatmap_deaths <- full_join(fixed_shp, AP_deaths, by= "HBName")
+
+# Create df of HB names and centered co-ords for labels later
+cnames <- aggregate(cbind(long, lat) ~ HBName, data=fixed_shp, FUN=mean)
+
+## Map of admissions
+fig3a <- ggplot() + 
+  geom_polygon(data = heatmap_admissions, aes(x = long, y = lat, group = group, fill = Foldchange),
+               color = 'black') + 
+  geom_label_repel(data=cnames,
+                   aes(x = long, y = lat, label= HBName, fontface= 'bold'),
+                   size = 2.5,
+                   max.overlaps = Inf,
+                   box.padding = 0.5)+
+  coord_fixed() + 
+  theme_void() +
+  scale_fill_viridis_c("Foldchange (%)",
+                       option = "G",
+                       limits= c(-100,350),
+                       oob = squish) +
+  labs(title = "Fold change of Admissions",
+       subtitle = "Between 2011 and 2020") +
+  theme(panel.border = element_rect(colour = "black",
+                                    fill = NA,
+                                    size = 1))
+## Map of deaths
+fig3b <- ggplot() + 
+  geom_polygon(data = heatmap_deaths, aes(x = long, y = lat, group = group, fill = Foldchange),
+               color = 'black') + 
+  geom_label_repel(data=cnames,
+                   aes(x = long, y = lat, label= HBName, fontface= 'bold'),
+                   size = 2.5,
+                   max.overlaps = Inf,
+                   box.padding = 0.5)+
+  coord_fixed() + 
+  theme_void() +
+  scale_fill_viridis_c("Foldchange (%)",
+                       option = "G",
+                       limits= c(0,1000),
+                       oob = squish) +
+  labs(title = "Fold change of Deaths",
+       subtitle = "Between 2011 and 2020") +
+  theme(panel.border = element_rect(colour = "black",
+                                    fill = NA,
+                                    size = 1))
+# GT table of Adult poisonings by HB 
+
+fig3c <- AP %>% 
+  ungroup() %>% 
+  gt(rowname_col = "HBName") %>% 
+  fmt_percent(columns = c(Foldchange.x,Foldchange.y),
+              decimals = 1) %>% 
+  tab_spanner(label = "Admissions",
+              columns = c("2011/12","2020/21",Foldchange.x)) %>% 
+  tab_spanner(label = "Deaths",
+              columns = c("2011","2020",Foldchange.y)) %>% 
+  tab_stubhead(label = "Health Boards") %>% 
+  cols_label( Foldchange.x = "Fold change",
+             Foldchange.y = "Fold change") %>%
+  tab_header(title = "Admissions and Deaths of Adult Poisonings in NHS Scotland ",
+             subtitle = "Counts of 2011 and 2020")
+# Saving Gt table as PNG to work with patchwork 
+#Solution by JohannesNE(https://github.com/rstudio/gt/issues/420)
+
+tmp <- tempfile(fileext = '.png') #generate path to temp .png file
+invisible(gtsave(fig3c, tmp, path = NULL)) #save gt table as png + invisble png output
+fig3c_png <- png::readPNG(tmp, native = TRUE) # read tmp png file
+
+# Fig 3
+((fig3a + fig3b) / fig3c_png)+
+  plot_annotation(tag_levels = "a",
+                  tag_suffix = ")",
+                  title = "Fig 3. NHS Scotland Unintentional Adult Poisonings",
+                  subtitle = "Breakdown of admissions and deaths",
+                  caption = "Data aggregated from all of NHS Scotlands' health boards",
+                  theme = theme(plot.title = element_text(hjust = 0.5),
+                                plot.subtitle = element_text(hjust = 0.5),
+                                plot.caption = element_text(hjust = 0)))
+```
+
+\footnotesize 
+In this figure we can see the distribution of both admissions and deaths caused by Poisonings in adults. This was illustrated in order to show which areas are the most affected and therefore which could benefit the most from targeted policy to tackle the issue.
+
+Fig 3. a,b) are heat maps of the NHS Scotland Health Board regions. These use the percentage fold change data for both admissions and deaths found in Fig 3.c). These were made to show where the HBs are situated and to show rates between NHS regions. Spatial data of NHS Scotland regions were taken from : https://spatialdata.gov.scot/geonetwork/srv/eng/catalog.search#/metadata/f12c3826-4b4b-40e6-bf4f-77b9ed01dc14
+
+Fig 3.c) shows the counts of admissions and deaths in each health board from 2011 and 2020 with a fold change column for both admissions and deaths, just as in previous tables. The heat maps above show a map of the health boards within Scotland and has used the percentage fold change data to show which HBs have had the greatest decrease or increase of unintentional poisonings.
+
+Overall, there is an increase in both admissions and deaths within this category of adults poisonings. Some HBs have seen a 1000% increase in both data sets and many in the hundreds of percent increase as well. We will examine some these trends next, starting with the smaller HBs.
+
+The HBs of Shetland, Orkney and the Western Isles have the lowest counts between admissions and deaths, with the fold change values being less reliable due to this fact. Yet the Western Isles have shown the greatest increase in admissions with 266% amongst the smaller HBs.
+
+NHS Greater Glasgow and Clyde and Lothian have the highest counts, seen in Fig3.c), yet this should be expected with the high population densities within these HBs. They mostly don't show high fold changes within admissions and deaths, with deaths in Lothian being an exception showing a 1000% increase from 30 to 334 deaths. These two HBs seem to have an established issue with poisonings before 2011 due to the relatively low fold changes.
+
+Other HBs have shown, however, that this issue has significantly changed in the last ten years. NHS Forth Valley, Lanarkshire, Tayside, and Fife all have increases in the hundreds of percent. NHS Forth has shown the greatest change in both admissions and deaths with an increase of 790% and 1000%, respectively.
+
+An explanation for this could come from how Poisonings are defined by Public Health Scotland. Drug and alcohol overdoses were recently reclassified as part of unintentional poisonings. Drug and alcohol abuse has been shown to be associated with deprivation in the areas where patients live^1,2^. Perhaps some of the sharp increases seen could be due to increase local deprivation and reductions in quality of life. 
+
+This explanation can be paralleled with findings in the 2020 PHS survey analysis of Unintentional Injuries where they show correlations between certain injury types and the Scottish deprivation index.Report linked below:
+
+(https://publichealthscotland.scot/publications/unintentional-injuries/unintentional-injuries-hospital-admissions-year-ending-31-march-2020-deaths-year-ending-31-december-2019/#:~:text=In%202019%2F20%2C%20there%20were,injuries%20led%20to%202%2C726%20deaths.)
+
+***
+
+## References
+1: Baumann, M., Spitz, E., Guillemin, F. et al. Associations of social and material deprivation with tobacco, alcohol, and psychotropic drug use, and gender: a population-based study. Int J Health Geogr 6, 50 (2007). https://doi.org/10.1186/1476-072X-6-50
+
+2: Probst, C., Lange, S., Kilian, C. et al. The dose-response relationship between socioeconomic deprivation and alcohol-attributable mortality risk—a systematic review and meta-analysis. BMC Med 19, 268 (2021). https://doi.org/10.1186/s12916-021-02132-z
